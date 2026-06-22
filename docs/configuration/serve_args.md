@@ -7,6 +7,9 @@ The `vllm serve` command is used to launch the OpenAI-compatible server.
 The `vllm serve` command is used to launch the OpenAI-compatible server.
 To see the available options, take a look at the [CLI Reference](../cli/README.md)!
 
+For CUDA Unified Memory advice on UVA CPU-offloaded model weights, see
+[CUDA Unified Memory Hints for UVA Weight Offload](../features/cuda_um_hints_offload.md).
+
 ## Configuration file
 
 You can load CLI arguments via a [YAML](https://yaml.org/) config file.

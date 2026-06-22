@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdio.h>
+#include <vector>
 
 #if defined(__HIPCC__)
   #define HOST_DEVICE_INLINE __host__ __device__
@@ -29,6 +30,9 @@
 int64_t get_device_attribute(int64_t attribute, int64_t device_id);
 
 int64_t get_max_shared_memory_per_block_device_attribute(int64_t device_id);
+int64_t get_cuda_runtime_version();
+int64_t get_cuda_driver_version();
+std::vector<int64_t> get_cuda_um_hints_device_attributes(int64_t device_id);
 
 namespace cuda_utils {
 

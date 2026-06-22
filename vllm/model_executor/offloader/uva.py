@@ -9,8 +9,14 @@ import torch.nn as nn
 from torch.func import functional_call
 
 import vllm.envs as envs
+from vllm.config.offload import OffloadMemoryAdvice
 from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import BaseOffloader, should_pin_memory
+from vllm.model_executor.offloader.cuda_memory_advice import (
+    advise_cuda_um_hints_for_tensor,
+    get_system_unified_cuda_view,
+    require_cuda_um_hints_support,
+)
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
@@ -19,11 +25,13 @@ logger = init_logger(__name__)
 
 
 class UVAOffloader(BaseOffloader):
-    """Offloader using Unified Virtual Addressing (UVA) for zero-copy access.
+    """UVA CPU weight offloader.
 
-    This offloader moves parameters to pinned CPU memory and creates CUDA views
-    using UVA. The GPU can then directly access the CPU memory without explicit
-    transfers, at the cost of PCIe bandwidth (slower than GPU memory).
+    Default mode stores selected offloaded weights through the existing
+    CUDA-visible pinned/mapped CPU memory path. cuda_um_hints mode stores
+    selected offloaded weights in ordinary non-pinned system memory, applies
+    CUDA Unified Memory advice, and creates CUDA-visible system-memory tensor
+    views on supported full Unified Memory platforms.
 
     When UVA is disabled via env var, falls back to a functional_call-based
     approach that moves parameters on-demand.
@@ -32,21 +40,36 @@ class UVAOffloader(BaseOffloader):
         cpu_offload_max_bytes: Maximum bytes to offload to CPU.
         cpu_offload_params: Set of parameter name segments to selectively
             offload. If empty, all parameters are eligible up to the byte limit.
+        memory_advice: CUDA memory advice policy for UVA offloading.
     """
 
     def __init__(
         self,
         cpu_offload_max_bytes: int,
         cpu_offload_params: set[str] | None = None,
+        memory_advice: OffloadMemoryAdvice = "none",
     ):
         self.cpu_offload_max_bytes = cpu_offload_max_bytes
         self.cpu_offload_bytes = 0
         self.cpu_offload_params = cpu_offload_params or set()
+        self.memory_advice = memory_advice
 
-        self.pin_memory = should_pin_memory()
         self.uva_offloading = (
             is_uva_available() and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_UVA
         )
+
+        if self.memory_advice == "cuda_um_hints":
+            if not self.uva_offloading:
+                raise RuntimeError(
+                    "offload_memory_advice=cuda_um_hints requires UVA offload; "
+                    "VLLM_WEIGHT_OFFLOADING_DISABLE_UVA must not be set."
+                )
+
+            device_id = torch.cuda.current_device() if torch.cuda.is_available() else 0
+            require_cuda_um_hints_support(device_id)
+            self.pin_memory = False
+        else:
+            self.pin_memory = should_pin_memory()
 
     def wrap_modules(
         self,
@@ -95,14 +118,33 @@ class UVAOffloader(BaseOffloader):
                     continue
 
             cpu_data = p.data.to(device="cpu")
-            if self.pin_memory:
-                cpu_data = cpu_data.pin_memory()
+            if not cpu_data.is_contiguous():
+                cpu_data = cpu_data.contiguous()
 
-            if not self.uva_offloading:
-                p.data = cpu_data
-            else:
-                p.data = get_accelerator_view_from_cpu_tensor(cpu_data)
+            if self.memory_advice == "cuda_um_hints":
+                if cpu_data.is_pinned():
+                    raise AssertionError(
+                        "cuda_um_hints offload requires non-pinned CPU memory"
+                    )
+
+                device_id = device.index
+                if device_id is None:
+                    device_id = torch.cuda.current_device()
+
+                advise_cuda_um_hints_for_tensor(cpu_data, device_id)
+                p.data = get_system_unified_cuda_view(cpu_data, device_id)
                 p._vllm_is_uva_offloaded = True
+                p._vllm_uva_memory_advice = "cuda_um_hints"
+            else:
+                if self.pin_memory:
+                    cpu_data = cpu_data.pin_memory()
+
+                if not self.uva_offloading:
+                    p.data = cpu_data
+                else:
+                    p.data = get_accelerator_view_from_cpu_tensor(cpu_data)
+                    p._vllm_is_uva_offloaded = True
+                    p._vllm_uva_memory_advice = "none"
 
             self.cpu_offload_bytes += p.data.numel() * p.data.element_size()
             offloaded_parameters = True

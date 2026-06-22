@@ -157,6 +157,7 @@ def create_offloader(offload_config: "OffloadConfig") -> BaseOffloader:
         return UVAOffloader(
             cpu_offload_max_bytes=int(uva.cpu_offload_gb * 1024**3),
             cpu_offload_params=uva.cpu_offload_params,
+            memory_advice=uva.memory_advice,
         )
     else:
         return NoopOffloader()

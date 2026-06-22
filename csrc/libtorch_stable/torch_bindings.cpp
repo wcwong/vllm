@@ -33,6 +33,10 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
 
   // TODO: Remove this once ROCm upgrade to torch 2.11.
   ops.def("get_cuda_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor");
+#ifdef VLLM_ENABLE_CUDA_UM_HINTS
+  ops.def("get_system_unified_cuda_view_from_cpu_tensor(Tensor cpu_tensor, int device_id) -> Tensor");
+  ops.def("cuda_advise_um_hints_for_tensor(Tensor cpu_tensor, int device_id) -> ()");
+#endif
 
   // Note about marlin kernel 'workspace' arguments:
   // Technically these should be mutable since they are modified by the kernel.
@@ -754,12 +758,21 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
 STABLE_TORCH_LIBRARY_IMPL(_C, CPU, ops) {
   ops.impl("get_cuda_view_from_cpu_tensor",
            TORCH_BOX(&get_cuda_view_from_cpu_tensor));
+#ifdef VLLM_ENABLE_CUDA_UM_HINTS
+  ops.impl("get_system_unified_cuda_view_from_cpu_tensor",
+           TORCH_BOX(&get_system_unified_cuda_view_from_cpu_tensor));
+  ops.impl("cuda_advise_um_hints_for_tensor",
+           TORCH_BOX(&cuda_advise_um_hints_for_tensor));
+#endif
 }
 
 STABLE_TORCH_LIBRARY_FRAGMENT(_C_cuda_utils, cuda_utils) {
   cuda_utils.def("get_device_attribute(int attribute, int device_id) -> int");
   cuda_utils.def(
       "get_max_shared_memory_per_block_device_attribute(int device_id) -> int");
+  cuda_utils.def("get_cuda_runtime_version() -> int");
+  cuda_utils.def("get_cuda_driver_version() -> int");
+  cuda_utils.def("get_cuda_um_hints_device_attributes(int device_id) -> int[]");
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C_cuda_utils, CompositeExplicitAutograd,
@@ -767,6 +780,11 @@ STABLE_TORCH_LIBRARY_IMPL(_C_cuda_utils, CompositeExplicitAutograd,
   cuda_utils.impl("get_device_attribute", TORCH_BOX(&get_device_attribute));
   cuda_utils.impl("get_max_shared_memory_per_block_device_attribute",
                   TORCH_BOX(&get_max_shared_memory_per_block_device_attribute));
+  cuda_utils.impl("get_cuda_runtime_version",
+                  TORCH_BOX(&get_cuda_runtime_version));
+  cuda_utils.impl("get_cuda_driver_version", TORCH_BOX(&get_cuda_driver_version));
+  cuda_utils.impl("get_cuda_um_hints_device_attributes",
+                  TORCH_BOX(&get_cuda_um_hints_device_attributes));
 }
 
 #endif

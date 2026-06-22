@@ -27,3 +27,30 @@ def test_cpu_offload(disable_pin_memory, disable_uva):
         env1=None,
         env2=env_vars,
     )
+
+
+def test_cpu_offload_cuda_um_hints():
+    try:
+        from vllm.model_executor.offloader.cuda_memory_advice import (
+            cuda_um_hints_supported,
+        )
+    except Exception as exc:
+        pytest.skip(f"cuda_um_hints support probe unavailable: {exc}")
+
+    if not cuda_um_hints_supported(0).supported:
+        pytest.skip("requires supported CUDA full Unified Memory platform")
+
+    compare_two_settings(
+        model="hmellor/tiny-random-LlamaForCausalLM",
+        arg1=[],
+        arg2=[
+            "--cpu-offload-gb",
+            "1",
+            "--offload-backend",
+            "uva",
+            "--offload-memory-advice",
+            "cuda_um_hints",
+        ],
+        env1=None,
+        env2=None,
+    )

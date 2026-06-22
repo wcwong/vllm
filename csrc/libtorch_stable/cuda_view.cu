@@ -10,6 +10,15 @@
 #include <array>
 #include <optional>
 
+bool is_pinned_cpu_tensor(torch::stable::Tensor& cpu_tensor) {
+  std::array<StableIValue, 2> is_pinned_stack{
+      torch::stable::detail::from(cpu_tensor),
+      torch::stable::detail::from(std::nullopt)};
+  TORCH_ERROR_CODE_CHECK(torch_call_dispatcher(
+      "aten::is_pinned", "", is_pinned_stack.data(), TORCH_ABI_VERSION));
+  return torch::stable::detail::to<bool>(is_pinned_stack[0]);
+}
+
 // This function assumes that `cpu_tensor` is a CPU tensor,
 // and that UVA (Unified Virtual Addressing) is enabled.
 torch::stable::Tensor get_cuda_view_from_cpu_tensor(
@@ -25,12 +34,7 @@ torch::stable::Tensor get_cuda_view_from_cpu_tensor(
     return torch::stable::empty(cpu_tensor.sizes(), dtype, layout, cuda_dev);
   }
 
-  std::array<StableIValue, 2> is_pinned_stack{
-      torch::stable::detail::from(cpu_tensor),
-      torch::stable::detail::from(std::nullopt)};
-  TORCH_ERROR_CODE_CHECK(torch_call_dispatcher(
-      "aten::is_pinned", "", is_pinned_stack.data(), TORCH_ABI_VERSION));
-  if (torch::stable::detail::to<bool>(is_pinned_stack[0])) {
+  if (is_pinned_cpu_tensor(cpu_tensor)) {
     // If CPU tensor is pinned, directly get the device pointer.
     void* host_ptr = const_cast<void*>(cpu_tensor.mutable_data_ptr());
     void* device_ptr = nullptr;
@@ -74,3 +78,28 @@ torch::stable::Tensor get_cuda_view_from_cpu_tensor(
                                   contiguous_cpu.strides(), cuda_dev,
                                   contiguous_cpu.scalar_type(), deleter);
 }
+
+#ifdef VLLM_ENABLE_CUDA_UM_HINTS
+torch::stable::Tensor get_system_unified_cuda_view_from_cpu_tensor(
+    torch::stable::Tensor& cpu_tensor, int64_t device_id) {
+  STD_TORCH_CHECK(cpu_tensor.device().is_cpu(), "Input tensor must be on CPU");
+  STD_TORCH_CHECK(!is_pinned_cpu_tensor(cpu_tensor),
+                  "system-unified CUDA view requires non-pinned CPU memory");
+  STD_TORCH_CHECK(cpu_tensor.is_contiguous(),
+                  "system-unified CUDA view requires contiguous CPU memory");
+
+  const torch::stable::Device cuda_dev(
+      torch::headeronly::DeviceType::CUDA,
+      static_cast<int16_t>(device_id));
+
+  if (cpu_tensor.numel() == 0) {
+    return torch::stable::empty(cpu_tensor.sizes(), cpu_tensor.scalar_type(),
+                                cpu_tensor.layout(), cuda_dev);
+  }
+
+  void* ptr = const_cast<void*>(cpu_tensor.mutable_data_ptr());
+  return torch::stable::from_blob(
+      ptr, cpu_tensor.sizes(), cpu_tensor.strides(), cuda_dev,
+      cpu_tensor.scalar_type(), [base = cpu_tensor](void*) {});
+}
+#endif

@@ -33,3 +33,42 @@ int64_t get_max_shared_memory_per_block_device_attribute(int64_t device_id) {
 
   return get_device_attribute(attribute, device_id);
 }
+
+#ifndef USE_ROCM
+int64_t get_cuda_runtime_version() {
+  int version = 0;
+  CUDA_CHECK(cudaRuntimeGetVersion(&version));
+  return static_cast<int64_t>(version);
+}
+
+int64_t get_cuda_driver_version() {
+  int version = 0;
+  CUDA_CHECK(cudaDriverGetVersion(&version));
+  return static_cast<int64_t>(version);
+}
+
+std::vector<int64_t> get_cuda_um_hints_device_attributes(int64_t device_id) {
+  int device = static_cast<int>(device_id);
+  if (device < 0) {
+    CUDA_CHECK(cudaGetDevice(&device));
+  }
+
+  int concurrent_managed_access = 0;
+  int pageable_memory_access = 0;
+  int pageable_memory_access_uses_host_page_tables = 0;
+
+  CUDA_CHECK(cudaDeviceGetAttribute(
+      &concurrent_managed_access, cudaDevAttrConcurrentManagedAccess, device));
+  CUDA_CHECK(cudaDeviceGetAttribute(
+      &pageable_memory_access, cudaDevAttrPageableMemoryAccess, device));
+  CUDA_CHECK(cudaDeviceGetAttribute(
+      &pageable_memory_access_uses_host_page_tables,
+      cudaDevAttrPageableMemoryAccessUsesHostPageTables, device));
+
+  return {
+      static_cast<int64_t>(concurrent_managed_access),
+      static_cast<int64_t>(pageable_memory_access),
+      static_cast<int64_t>(pageable_memory_access_uses_host_page_tables),
+  };
+}
+#endif

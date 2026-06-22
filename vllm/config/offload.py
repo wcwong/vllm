@@ -10,14 +10,18 @@ from pydantic import Field, model_validator
 from vllm.config.utils import config
 
 OffloadBackend = Literal["auto", "uva", "prefetch"]
+OffloadMemoryAdvice = Literal["none", "cuda_um_hints"]
 
 
 @config
 class UVAOffloadConfig:
-    """Configuration for UVA (Unified Virtual Addressing) CPU offloading.
+    """Configuration for UVA CPU weight offloading.
 
-    Uses zero-copy access from CPU-pinned memory. Simple but requires
-    fast CPU-GPU interconnect.
+    Default UVA offload uses CUDA-visible CPU memory through the existing
+    pinned/mapped helper path. The optional cuda_um_hints mode stores selected
+    offloaded weights in ordinary non-pinned system memory, applies CUDA
+    Unified Memory advice, and creates CUDA-visible system-memory tensor views
+    on supported full Unified Memory platforms.
     """
 
     cpu_offload_gb: float = Field(default=0, ge=0)
@@ -41,6 +45,18 @@ class UVAOffloadConfig:
             - "experts" or "experts.w2_weight" will match.
             - "expert" or "w2" will NOT match (must be exact segments).
     This allows distinguishing parameters like "w2_weight" and "w2_weight_scale".
+    """
+
+    memory_advice: OffloadMemoryAdvice = Field(default="none")
+    """CUDA memory advice policy for UVA CPU weight offloading.
+
+    "none" does not apply additional memory advice.
+
+    "cuda_um_hints" stores selected CPU-offloaded weights in ordinary non-pinned
+    CPU memory, applies CUDA Unified Memory read-mostly and accessed-by advice,
+    and exposes those weights through CUDA-visible system-memory tensor views.
+    Requires --offload-backend uva, --cpu-offload-gb > 0, and a supported CUDA
+    Unified Memory platform.
     """
 
 
@@ -97,6 +113,27 @@ class OffloadConfig:
     @model_validator(mode="after")
     def validate_offload_config(self) -> "OffloadConfig":
         """Validate offload configuration constraints."""
+        if self.uva.memory_advice == "cuda_um_hints":
+            if self.uva.cpu_offload_gb <= 0:
+                raise ValueError(
+                    "offload_memory_advice=cuda_um_hints requires "
+                    "cpu_offload_gb > 0."
+                )
+
+            resolved_backend = self.offload_backend
+            if resolved_backend == "auto":
+                if self.prefetch.offload_group_size > 0:
+                    raise ValueError(
+                        "offload_memory_advice=cuda_um_hints is supported "
+                        "with UVA weight offload; use --offload-backend uva."
+                    )
+                resolved_backend = "uva"
+
+            if resolved_backend != "uva":
+                raise ValueError(
+                    "offload_memory_advice=cuda_um_hints requires "
+                    "--offload-backend uva."
+                )
         if self.offload_backend == "prefetch" or self.prefetch.offload_group_size > 0:
             if self.prefetch.offload_num_in_group > self.prefetch.offload_group_size:
                 raise ValueError(
