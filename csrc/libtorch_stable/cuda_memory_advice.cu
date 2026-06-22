@@ -3,6 +3,8 @@
 #include <torch/csrc/stable/ops.h>
 #include <torch/csrc/stable/tensor.h>
 
+#include "ops.h"
+
 namespace {
 
 void check_cuda(cudaError_t err, const char* what) {
