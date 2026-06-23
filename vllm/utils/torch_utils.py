@@ -814,21 +814,18 @@ def get_accelerator_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tens
         )
 
 
-def get_system_unified_cuda_view_from_cpu_tensor(
-    cpu_tensor: torch.Tensor,
+def copy_to_managed_cuda_tensor(
+    tensor: torch.Tensor,
     device: int,
 ) -> torch.Tensor:
-    """Create a CUDA-visible view over non-pinned CPU system memory.
+    """Copy a tensor into CUDA managed memory and return a CUDA tensor.
 
     This helper only wraps the C++ op. It does not perform CUDA UM hints
     capability validation and is not a general CPU-to-CUDA conversion helper.
     Callers must validate platform support before using it.
     """
 
-    return torch.ops._C.get_system_unified_cuda_view_from_cpu_tensor(
-        cpu_tensor,
-        device,
-    )
+    return torch.ops._C.copy_to_managed_cuda_tensor(tensor, device)
 
 
 # Helper function used in testing.

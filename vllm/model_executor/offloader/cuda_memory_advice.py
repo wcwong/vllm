@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CUDA Unified Memory hints support for UVA weight offload."""
+"""CUDA managed-memory hints support for UVA weight offload."""
 
 from __future__ import annotations
 
@@ -11,13 +11,13 @@ from typing import Literal
 
 import torch
 
-from vllm.utils.torch_utils import get_system_unified_cuda_view_from_cpu_tensor
+from vllm.utils.torch_utils import copy_to_managed_cuda_tensor
 
 CUDA_UM_HINTS_MIN_VERSION = 13000
 
 CudaUMHintsCapability = Literal[
     "unsupported",
-    "hints_and_hardware_coherent_mapping",
+    "managed_memory_hints",
 ]
 
 
@@ -39,10 +39,7 @@ def _cuda_um_hints_supported_ops_available() -> bool:
     except AttributeError:
         return False
 
-    required_cuda_ops = (
-        "get_system_unified_cuda_view_from_cpu_tensor",
-        "cuda_advise_um_hints_for_tensor",
-    )
+    required_cuda_ops = ("copy_to_managed_cuda_tensor",)
     required_cuda_utils_ops = (
         "get_cuda_runtime_version",
         "get_cuda_driver_version",
@@ -81,7 +78,7 @@ def _supported_support(
 ) -> CudaUMHintsSupport:
     return CudaUMHintsSupport(
         supported=True,
-        capability="hints_and_hardware_coherent_mapping",
+        capability="managed_memory_hints",
         reason="supported",
         runtime_version=runtime_version,
         driver_version=driver_version,
@@ -90,34 +87,29 @@ def _supported_support(
     )
 
 
-def _unsupported_reason_for_attrs(attrs: dict[str, int]) -> str | None:
-    if not attrs:
-        return "failed to query CUDA Unified Memory capability attributes."
+def _query_cuda_um_hints_device_attributes(device: int) -> dict[str, int]:
+    try:
+        values = torch.ops._C_cuda_utils.get_cuda_um_hints_device_attributes(int(device))
+    except Exception as exc:
+        raise RuntimeError(
+            "failed to query CUDA UM hints device attributes: "
+            f"{exc}"
+        ) from exc
 
-    required = (
-        "concurrentManagedAccess",
-        "pageableMemoryAccess",
-        "pageableMemoryAccessUsesHostPageTables",
-    )
-    missing = [name for name in required if attrs.get(name, 0) != 1]
-    if not missing:
-        return None
-
-    details = ", ".join(f"{name}={attrs.get(name, 0)}" for name in required)
-    return (
-        "full Unified Memory support for pageable system memory is not available: "
-        f"{details}."
-    )
+    return {
+        "concurrentManagedAccess": int(values[0]),
+        "pageableMemoryAccess": int(values[1]),
+        "pageableMemoryAccessUsesHostPageTables": int(values[2]),
+    }
 
 
 @lru_cache(maxsize=None)
 def cuda_um_hints_supported(device: int) -> CudaUMHintsSupport:
-    """Return whether CUDA Unified Memory hints mode is supported.
+    """Return whether CUDA managed-memory hints mode is supported.
 
-    The probe targets CUDA-capable Linux systems where ordinary non-pinned
-    system memory can be accessed by GPU work through full Unified Memory
-    support for pageable system memory with hardware-coherent host page-table
-    access.
+    The probe targets CUDA-capable Linux systems where vLLM can allocate
+    CUDA managed memory, apply Unified Memory advice to the managed range,
+    expose it as a CUDA tensor, and read it correctly from GPU work.
     """
 
     kernel_release = platform.release()
@@ -142,7 +134,7 @@ def cuda_um_hints_supported(device: int) -> CudaUMHintsSupport:
 
     if not _cuda_um_hints_supported_ops_available():
         return _unsupported_support(
-            "vLLM was built without CUDA Unified Memory hints support.",
+            "vLLM was built without CUDA managed-memory hints support.",
             kernel_release=kernel_release,
         )
 
@@ -172,26 +164,19 @@ def cuda_um_hints_supported(device: int) -> CudaUMHintsSupport:
         )
 
     try:
-        values = torch.ops._C_cuda_utils.get_cuda_um_hints_device_attributes(
-            int(device)
-        )
-    except Exception as exc:  # pragma: no cover - defensive probe guard
+        attrs = _query_cuda_um_hints_device_attributes(int(device))
+    except RuntimeError as exc:
         return _unsupported_support(
-            f"failed to query CUDA Unified Memory capability attributes: {exc}",
+            str(exc),
             runtime_version=runtime_version,
             driver_version=driver_version,
             kernel_release=kernel_release,
         )
 
-    attrs = {
-        "concurrentManagedAccess": int(values[0]),
-        "pageableMemoryAccess": int(values[1]),
-        "pageableMemoryAccessUsesHostPageTables": int(values[2]),
-    }
-    reason = _unsupported_reason_for_attrs(attrs)
-    if reason is not None:
+    canary_supported, canary_reason = _managed_memory_canary(int(device))
+    if not canary_supported:
         return _unsupported_support(
-            reason,
+            canary_reason,
             runtime_version=runtime_version,
             driver_version=driver_version,
             attrs=attrs,
@@ -206,8 +191,36 @@ def cuda_um_hints_supported(device: int) -> CudaUMHintsSupport:
     )
 
 
+def _managed_memory_canary(device: int) -> tuple[bool, str]:
+    try:
+        cpu = torch.arange(1024, dtype=torch.float32, device="cpu")
+        managed = copy_to_managed_cuda_tensor(cpu, device)
+
+        if not managed.is_cuda:
+            return False, "managed-memory op did not return a CUDA tensor"
+
+        if managed.device.index != device:
+            return False, (
+                f"managed-memory op returned unexpected device: {managed.device}"
+            )
+
+        if managed.shape != cpu.shape:
+            return False, "managed-memory op returned unexpected shape"
+
+        torch.testing.assert_close(managed.cpu(), cpu)
+
+        out = (managed * 2).sum()
+        torch.cuda.synchronize(device)
+        expected = (cpu * 2).sum()
+        torch.testing.assert_close(out.cpu(), expected)
+
+        return True, "supported"
+    except Exception as exc:  # pragma: no cover - defensive probe guard
+        return False, f"CUDA managed-memory tensor canary failed: {exc}"
+
+
 def require_cuda_um_hints_support(device: int) -> None:
-    """Raise RuntimeError if CUDA Unified Memory hints mode is unsupported."""
+    """Raise RuntimeError if CUDA managed-memory hints mode is unsupported."""
 
     support = cuda_um_hints_supported(device)
     if not support.supported:
@@ -217,50 +230,18 @@ def require_cuda_um_hints_support(device: int) -> None:
         )
 
 
-def advise_cuda_um_hints_for_tensor(
+def copy_tensor_to_cuda_um_hints_storage(
     tensor: torch.Tensor,
     device: int,
-) -> None:
-    """Apply CUDA Unified Memory advice to a CPU tensor.
-
-    Applies cudaMemAdviseSetReadMostly and cudaMemAdviseSetAccessedBy
-    to the tensor's CPU backing storage.
-    """
+) -> torch.Tensor:
+    """Copy a contiguous tensor into CUDA managed storage with UM advice."""
 
     require_cuda_um_hints_support(device)
 
-    if tensor.device.type != "cpu":
-        raise ValueError("cuda_um_hints requires a CPU tensor.")
-
-    if tensor.is_pinned():
-        raise ValueError("cuda_um_hints requires non-pinned CPU memory.")
+    if tensor.device.type not in {"cpu", "cuda"}:
+        raise ValueError("cuda_um_hints requires a CPU or CUDA tensor.")
 
     if not tensor.is_contiguous():
-        raise ValueError("cuda_um_hints requires contiguous CPU tensors in PR 1.")
+        raise ValueError("cuda_um_hints requires contiguous tensors in PR 1.")
 
-    torch.ops._C.cuda_advise_um_hints_for_tensor(tensor, device)
-
-
-def get_system_unified_cuda_view(
-    cpu_tensor: torch.Tensor,
-    device: int,
-) -> torch.Tensor:
-    """Create a CUDA tensor view over ordinary non-pinned CPU memory.
-
-    This is the cuda_um_hints feature wrapper. It validates the platform and
-    tensor preconditions, then calls the low-level torch_utils wrapper around
-    the C++ op.
-    """
-
-    require_cuda_um_hints_support(device)
-
-    if cpu_tensor.device.type != "cpu":
-        raise ValueError("cuda_um_hints requires a CPU tensor.")
-
-    if cpu_tensor.is_pinned():
-        raise ValueError("cuda_um_hints requires non-pinned CPU memory.")
-
-    if not cpu_tensor.is_contiguous():
-        raise ValueError("cuda_um_hints requires contiguous CPU tensors in PR 1.")
-
-    return get_system_unified_cuda_view_from_cpu_tensor(cpu_tensor, device)
+    return copy_to_managed_cuda_tensor(tensor, device)

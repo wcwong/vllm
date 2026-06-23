@@ -1,10 +1,10 @@
 # CUDA Unified Memory Hints for UVA Weight Offload
 
 `cuda_um_hints` is an optional UVA weight-offload mode for supported CUDA
-systems. It keeps selected offloaded weights in ordinary non-pinned CPU
-system memory, applies `cudaMemAdviseSetReadMostly` and
-`cudaMemAdviseSetAccessedBy`, and exposes those weights through
-CUDA-visible system-memory tensor views.
+systems. It stores selected offloaded weights in CUDA managed memory via
+`cudaMallocManaged`, copies the weight bytes into that managed allocation,
+applies `cudaMemAdviseSetReadMostly` and `cudaMemAdviseSetAccessedBy`, and
+exposes the result as a normal CUDA tensor.
 
 ## Usage
 
@@ -22,8 +22,9 @@ vllm serve "$MODEL" \
 - CUDA 13.0+
 - `--offload-backend uva`
 - `--cpu-offload-gb > 0`
-- Full Unified Memory support for pageable system memory
-- Non-pinned CPU storage
+- A managed-memory canary that proves `cudaMallocManaged`, tensor wrapping,
+  `cudaMemAdviseSetReadMostly`, `cudaMemAdviseSetAccessedBy`, and GPU reads all
+  work on the target platform
 
 ## What Changes
 
@@ -35,15 +36,15 @@ vllm serve "$MODEL" \
 
 ## Validation
 
-- Compare the default UVA path, a system-unified CUDA view without advice,
-  and the same view with `cuda_um_hints`.
+- Compare the default UVA path against the managed-memory copy path.
 - A microbenchmark is provided at
   `benchmarks/offload/benchmark_cuda_um_hints_offload.py`.
 
 ## Limits
 
-- `--cpu-offload-gb` is still an offload budget for weights, not a memory
-  guarantee.
+- `--cpu-offload-gb` is still an offload budget for weights, not a physical
+  memory guarantee.
+- Managed-memory pages may reside in system memory, HBM, or migrate under CUDA
+  runtime and driver policy.
 - This mode does not change KV-cache allocation or scheduler behavior.
-- Unsupported systems fail during startup when `cuda_um_hints` is
-  requested.
+- Unsupported systems fail during startup when `cuda_um_hints` is requested.

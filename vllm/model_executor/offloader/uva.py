@@ -13,8 +13,7 @@ from vllm.config.offload import OffloadMemoryAdvice
 from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import BaseOffloader, should_pin_memory
 from vllm.model_executor.offloader.cuda_memory_advice import (
-    advise_cuda_um_hints_for_tensor,
-    get_system_unified_cuda_view,
+    copy_tensor_to_cuda_um_hints_storage,
     require_cuda_um_hints_support,
 )
 from vllm.utils.mem_utils import format_gib
@@ -29,9 +28,9 @@ class UVAOffloader(BaseOffloader):
 
     Default mode stores selected offloaded weights through the existing
     CUDA-visible pinned/mapped CPU memory path. cuda_um_hints mode stores
-    selected offloaded weights in ordinary non-pinned system memory, applies
-    CUDA Unified Memory advice, and creates CUDA-visible system-memory tensor
-    views on supported full Unified Memory platforms.
+    selected offloaded weights in CUDA managed memory, applies CUDA Unified
+    Memory advice, and exposes them as CUDA tensors backed by managed
+    storage on supported platforms.
 
     When UVA is disabled via env var, falls back to a functional_call-based
     approach that moves parameters on-demand.
@@ -118,21 +117,16 @@ class UVAOffloader(BaseOffloader):
                     continue
 
             cpu_data = p.data.to(device="cpu")
-            if not cpu_data.is_contiguous():
-                cpu_data = cpu_data.contiguous()
 
             if self.memory_advice == "cuda_um_hints":
-                if cpu_data.is_pinned():
-                    raise AssertionError(
-                        "cuda_um_hints offload requires non-pinned CPU memory"
-                    )
+                if not cpu_data.is_contiguous():
+                    cpu_data = cpu_data.contiguous()
 
                 device_id = device.index
                 if device_id is None:
                     device_id = torch.cuda.current_device()
 
-                advise_cuda_um_hints_for_tensor(cpu_data, device_id)
-                p.data = get_system_unified_cuda_view(cpu_data, device_id)
+                p.data = copy_tensor_to_cuda_um_hints_storage(cpu_data, device_id)
                 p._vllm_is_uva_offloaded = True
                 p._vllm_uva_memory_advice = "cuda_um_hints"
             else:
@@ -144,7 +138,6 @@ class UVAOffloader(BaseOffloader):
                 else:
                     p.data = get_accelerator_view_from_cpu_tensor(cpu_data)
                     p._vllm_is_uva_offloaded = True
-                    p._vllm_uva_memory_advice = "none"
 
             self.cpu_offload_bytes += p.data.numel() * p.data.element_size()
             offloaded_parameters = True

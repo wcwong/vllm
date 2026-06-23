@@ -1576,24 +1576,16 @@ if hasattr(torch.ops._C, "permute_cols"):
         return torch.empty_like(a)
 
 
-if hasattr(torch.ops._C, "get_system_unified_cuda_view_from_cpu_tensor"):
+if hasattr(torch.ops._C, "copy_to_managed_cuda_tensor"):
 
-    @register_fake("_C::get_system_unified_cuda_view_from_cpu_tensor")
-    def _get_system_unified_cuda_view_from_cpu_tensor_fake(
-        cpu_tensor: torch.Tensor,
+    @register_fake("_C::copy_to_managed_cuda_tensor")
+    def _copy_to_managed_cuda_tensor_fake(
+        tensor: torch.Tensor,
         device_id: int,
     ) -> torch.Tensor:
-        return torch.empty_like(cpu_tensor)
-
-
-if hasattr(torch.ops._C, "cuda_advise_um_hints_for_tensor"):
-
-    @register_fake("_C::cuda_advise_um_hints_for_tensor")
-    def _cuda_advise_um_hints_for_tensor_fake(
-        cpu_tensor: torch.Tensor,
-        device_id: int,
-    ) -> None:
-        return None
+        return torch.empty_like(
+            tensor, device=torch.device("cuda", device_id)
+        )
 
 
 # fp4

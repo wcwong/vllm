@@ -23,6 +23,7 @@ from typing import (
     cast,
     get_args,
     get_origin,
+    get_type_hints as typing_get_type_hints,
 )
 
 import huggingface_hub
@@ -128,6 +129,7 @@ if TYPE_CHECKING:
     from vllm.v1.executor import Executor
 else:
     Executor = Any
+    QuantizationConfigArgs = Any
     QuantizationMethods = Any
     LoadFormats = Any
     UsageContext = Any
@@ -289,10 +291,16 @@ def _expand_json_human_readable_numbers(val: str) -> str:
 def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
     # Save time only getting attr docs if we're generating help text
     cls_docs = get_attr_docs(cls) if NEEDS_HELP else {}
+    try:
+        resolved_type_hints = typing_get_type_hints(cls, include_extras=True)
+    except Exception:
+        resolved_type_hints = {}
     kwargs = {}
     for field in fields(cls):
         # Get the set of possible types for the field
-        type_hints: set[TypeHint] = get_type_hints(field.type)
+        type_hints: set[TypeHint] = get_type_hints(
+            resolved_type_hints.get(field.name, field.type)
+        )
 
         # If the field is a dataclass, we can use the model_validate_json
         generator = (th for th in type_hints if is_dataclass(th))
@@ -518,15 +526,15 @@ class EngineArgs:
     cpu_offload_gb: float = UVAOffloadConfig.cpu_offload_gb
     cpu_offload_params: set[str] = get_field(UVAOffloadConfig, "cpu_offload_params")
     offload_memory_advice: OffloadMemoryAdvice = UVAOffloadConfig.memory_advice
-    """CUDA memory advice policy for UVA CPU weight offloading.
+    """CUDA managed-memory policy for UVA CPU weight offloading.
 
     "none" does not apply additional memory advice.
 
-    "cuda_um_hints" stores selected CPU-offloaded weights in ordinary non-pinned
-    CPU memory, applies CUDA Unified Memory read-mostly and accessed-by advice,
-    and exposes those weights through CUDA-visible system-memory tensor views.
-    Requires --offload-backend uva, --cpu-offload-gb > 0, and a supported CUDA
-    Unified Memory platform.
+    "cuda_um_hints" stores selected offloaded weights in CUDA managed memory,
+    applies CUDA Unified Memory read-mostly and accessed-by advice, and exposes
+    those weights as CUDA tensors backed by managed storage. Requires
+    --offload-backend uva, --cpu-offload-gb > 0, and a supported CUDA managed
+    memory platform.
     """
     offload_group_size: int = PrefetchOffloadConfig.offload_group_size
     offload_num_in_group: int = PrefetchOffloadConfig.offload_num_in_group

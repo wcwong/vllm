@@ -34,8 +34,7 @@ from vllm.utils.mem_utils import release_device_memory_under_pressure
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 from vllm.model_executor.offloader.cuda_memory_advice import (
-    advise_cuda_um_hints_for_tensor,
-    get_system_unified_cuda_view,
+    copy_tensor_to_cuda_um_hints_storage,
 )
 
 logger = init_logger(__name__)
@@ -146,20 +145,18 @@ def device_loading_context(module: torch.nn.Module, target_device: torch.device)
     uva_offloaded_parameters: dict[str, str] = {}
 
     # Store original device states and move parameters to GPU if they're on CPU.
-    # We also materialize any recorded UVA-offloaded parameters so post-load
-    # processing always sees a real target-device tensor.
+    # Existing UVA-offloaded parameters already present as CUDA tensors; leave
+    # their backing storage untouched unless a post-load step replaces them.
     for name, p in module.named_parameters():
+        if p.device.type == "cpu":
+            original_device_states[name] = p.device
+            p.data = p.data.to(target_device)
+
         if getattr(p, "_vllm_is_uva_offloaded", False):
             uva_offloaded_parameters[name] = getattr(
                 p, "_vllm_uva_memory_advice", "none"
             )
-
-        if p.device.type == "cpu" or name in uva_offloaded_parameters:
-            if p.device.type == "cpu":
-                original_device_states[name] = p.device
-            p.data = p.data.to(device=target_device, copy=True)
-        # Parameters already on target device are not touched unless they were
-        # already recorded as UVA-offloaded views.
+        # Parameters already on target device are not touched.
 
     try:
         yield module
@@ -171,35 +168,39 @@ def device_loading_context(module: torch.nn.Module, target_device: torch.device)
         )
         # Restore parameters to their original devices, ignoring new parameters.
         for name, p in module.named_parameters():
-            if name in uva_offloaded_parameters:
+            if name in original_device_states:
+                original_device: torch.device = original_device_states[name]
+                p.data = p.data.to(original_device)
+
+            # Parameter is UVA offloaded, but was replaced with a new device
+            # tensor. Re-offload it using the original UVA storage policy.
+            if name in uva_offloaded_parameters and not getattr(
+                p, "_vllm_is_uva_offloaded", False
+            ):
                 memory_advice = uva_offloaded_parameters[name]
                 cpu_data = p.data.to(device="cpu")
-                if not cpu_data.is_contiguous():
-                    cpu_data = cpu_data.contiguous()
 
                 if memory_advice == "cuda_um_hints":
+                    if not cpu_data.is_contiguous():
+                        cpu_data = cpu_data.contiguous()
+
                     device_id = target_device.index
                     if device_id is None:
                         device_id = torch.cuda.current_device()
 
-                    if cpu_data.is_pinned():
-                        raise AssertionError(
-                            "cuda_um_hints re-offload requires non-pinned CPU "
-                            "memory"
-                        )
-
-                    advise_cuda_um_hints_for_tensor(cpu_data, device_id)
-                    p.data = get_system_unified_cuda_view(cpu_data, device_id)
+                    p.data = copy_tensor_to_cuda_um_hints_storage(
+                        cpu_data, device_id
+                    )
                 else:
                     if use_pin_memory:
                         cpu_data = cpu_data.pin_memory()
                     p.data = get_accelerator_view_from_cpu_tensor(cpu_data)
 
                 p._vllm_is_uva_offloaded = True
-                p._vllm_uva_memory_advice = memory_advice
-            elif name in original_device_states:
-                original_device: torch.device = original_device_states[name]
-                p.data = p.data.to(original_device)
+                if memory_advice == "cuda_um_hints":
+                    p._vllm_uva_memory_advice = memory_advice
+                elif hasattr(p, "_vllm_uva_memory_advice"):
+                    delattr(p, "_vllm_uva_memory_advice")
 
 
 _MODEL_ARCH_BY_HASH = dict[int, tuple[type[nn.Module], str]]()

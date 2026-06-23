@@ -419,8 +419,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/libtorch_stable/cuda_view.cu"
       "csrc/libtorch_stable/cuda_utils_kernels.cu")
 
+    set(VLLM_ENABLE_CUDA_UM_HINTS OFF)
     if(VLLM_GPU_LANG STREQUAL "CUDA" AND
        CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.0)
+      set(VLLM_ENABLE_CUDA_UM_HINTS ON)
       list(APPEND VLLM_STABLE_EXT_SRC
         "csrc/libtorch_stable/cuda_memory_advice.cu")
     endif()
@@ -1057,8 +1059,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     target_compile_definitions(_C_stable_libtorch PRIVATE
       TORCH_TARGET_VERSION=0x020B000000000000ULL)
     target_compile_definitions(_C_stable_libtorch PRIVATE USE_CUDA)
-    target_compile_definitions(_C_stable_libtorch PRIVATE
-      VLLM_ENABLE_CUDA_UM_HINTS=1)
+    if(VLLM_ENABLE_CUDA_UM_HINTS)
+      target_compile_definitions(_C_stable_libtorch PRIVATE
+        VLLM_ENABLE_CUDA_UM_HINTS=1)
+    endif()
     # Needed by CUTLASS kernels
     target_compile_definitions(_C_stable_libtorch PRIVATE
       CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)

@@ -19,9 +19,9 @@ class UVAOffloadConfig:
 
     Default UVA offload uses CUDA-visible CPU memory through the existing
     pinned/mapped helper path. The optional cuda_um_hints mode stores selected
-    offloaded weights in ordinary non-pinned system memory, applies CUDA
-    Unified Memory advice, and creates CUDA-visible system-memory tensor views
-    on supported full Unified Memory platforms.
+    offloaded weights in CUDA managed memory, applies CUDA Unified Memory
+    advice, and exposes them as CUDA tensors backed by managed storage on
+    supported CUDA platforms.
     """
 
     cpu_offload_gb: float = Field(default=0, ge=0)
@@ -48,15 +48,15 @@ class UVAOffloadConfig:
     """
 
     memory_advice: OffloadMemoryAdvice = Field(default="none")
-    """CUDA memory advice policy for UVA CPU weight offloading.
+    """CUDA managed-memory policy for UVA CPU weight offloading.
 
     "none" does not apply additional memory advice.
 
-    "cuda_um_hints" stores selected CPU-offloaded weights in ordinary non-pinned
-    CPU memory, applies CUDA Unified Memory read-mostly and accessed-by advice,
-    and exposes those weights through CUDA-visible system-memory tensor views.
-    Requires --offload-backend uva, --cpu-offload-gb > 0, and a supported CUDA
-    Unified Memory platform.
+    "cuda_um_hints" stores selected CPU-offloaded weights in CUDA managed
+    memory, applies CUDA Unified Memory read-mostly and accessed-by advice,
+    and exposes those weights as CUDA tensors backed by managed storage.
+    Requires --offload-backend uva, --cpu-offload-gb > 0, and a supported
+    CUDA managed-memory platform.
     """
 
 

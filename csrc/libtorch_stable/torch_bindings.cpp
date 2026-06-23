@@ -34,8 +34,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   // TODO: Remove this once ROCm upgrade to torch 2.11.
   ops.def("get_cuda_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor");
 #ifdef VLLM_ENABLE_CUDA_UM_HINTS
-  ops.def("get_system_unified_cuda_view_from_cpu_tensor(Tensor cpu_tensor, int device_id) -> Tensor");
-  ops.def("cuda_advise_um_hints_for_tensor(Tensor cpu_tensor, int device_id) -> ()");
+  ops.def("copy_to_managed_cuda_tensor(Tensor src, int device_id) -> Tensor");
 #endif
 
   // Note about marlin kernel 'workspace' arguments:
@@ -759,12 +758,17 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CPU, ops) {
   ops.impl("get_cuda_view_from_cpu_tensor",
            TORCH_BOX(&get_cuda_view_from_cpu_tensor));
 #ifdef VLLM_ENABLE_CUDA_UM_HINTS
-  ops.impl("get_system_unified_cuda_view_from_cpu_tensor",
-           TORCH_BOX(&get_system_unified_cuda_view_from_cpu_tensor));
-  ops.impl("cuda_advise_um_hints_for_tensor",
-           TORCH_BOX(&cuda_advise_um_hints_for_tensor));
+  ops.impl("copy_to_managed_cuda_tensor",
+           TORCH_BOX(&copy_to_managed_cuda_tensor));
 #endif
 }
+
+#ifdef VLLM_ENABLE_CUDA_UM_HINTS
+STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
+  ops.impl("copy_to_managed_cuda_tensor",
+           TORCH_BOX(&copy_to_managed_cuda_tensor));
+}
+#endif
 
 STABLE_TORCH_LIBRARY_FRAGMENT(_C_cuda_utils, cuda_utils) {
   cuda_utils.def("get_device_attribute(int attribute, int device_id) -> int");

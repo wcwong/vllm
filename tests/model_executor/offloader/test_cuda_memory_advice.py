@@ -115,19 +115,24 @@ def _prime_supported_probe(monkeypatch) -> None:
     monkeypatch.setattr(
         cuda_memory_advice.torch.ops._C_cuda_utils,
         "get_cuda_um_hints_device_attributes",
-        lambda device: [1, 1, 1],
+        lambda device: [0, 0, 0],
         raising=False,
+    )
+    monkeypatch.setattr(
+        cuda_memory_advice,
+        "_managed_memory_canary",
+        lambda device: (True, "supported"),
     )
 
 
-def test_cuda_um_hints_supported_uses_batched_attribute_helper(monkeypatch):
+def test_cuda_um_hints_supported_reports_diagnostics_and_caches(monkeypatch):
     calls = {"attrs": 0}
     _prime_supported_probe(monkeypatch)
 
     def get_attrs(device: int):
         calls["attrs"] += 1
         assert device == 0
-        return [1, 1, 1]
+        return [0, 0, 0]
 
     monkeypatch.setattr(
         cuda_memory_advice.torch.ops._C_cuda_utils,
@@ -139,14 +144,15 @@ def test_cuda_um_hints_supported_uses_batched_attribute_helper(monkeypatch):
     support = cuda_memory_advice.cuda_um_hints_supported(0)
 
     assert support.supported
-    assert support.capability == "hints_and_hardware_coherent_mapping"
+    assert support.capability == "managed_memory_hints"
     assert support.runtime_version == 13000
     assert support.driver_version == 13000
     assert support.attrs == {
-        "concurrentManagedAccess": 1,
-        "pageableMemoryAccess": 1,
-        "pageableMemoryAccessUsesHostPageTables": 1,
+        "concurrentManagedAccess": 0,
+        "pageableMemoryAccess": 0,
+        "pageableMemoryAccessUsesHostPageTables": 0,
     }
+    assert support.reason == "supported"
     assert calls["attrs"] == 1
 
     cached = cuda_memory_advice.cuda_um_hints_supported(0)
@@ -181,7 +187,7 @@ def test_cuda_um_hints_supported_uses_batched_attribute_helper(monkeypatch):
             lambda mod, monkeypatch: monkeypatch.setattr(
                 mod, "_cuda_um_hints_supported_ops_available", lambda: False
             ),
-            "built without CUDA Unified Memory hints support",
+            "built without CUDA managed-memory hints support",
         ),
         (
             lambda mod, monkeypatch: monkeypatch.setattr(
@@ -205,10 +211,18 @@ def test_cuda_um_hints_supported_uses_batched_attribute_helper(monkeypatch):
             lambda mod, monkeypatch: monkeypatch.setattr(
                 mod.torch.ops._C_cuda_utils,
                 "get_cuda_um_hints_device_attributes",
-                lambda device: [1, 0, 1],
+                lambda device: (_ for _ in ()).throw(RuntimeError("attrs failed")),
                 raising=False,
             ),
-            "full Unified Memory support",
+            "failed to query CUDA UM hints device attributes",
+        ),
+        (
+            lambda mod, monkeypatch: monkeypatch.setattr(
+                mod,
+                "_managed_memory_canary",
+                lambda device: (False, "managed canary failed"),
+            ),
+            "managed canary failed",
         ),
     ],
 )
@@ -224,49 +238,9 @@ def test_cuda_um_hints_supported_unsupported_cases(
     assert reason_fragment in support.reason
 
 
-def test_advise_cuda_um_hints_for_tensor_preconditions(monkeypatch):
-    advise = Mock()
-    monkeypatch.setattr(
-        cuda_memory_advice,
-        "require_cuda_um_hints_support",
-        lambda device: None,
-    )
-    monkeypatch.setattr(
-        cuda_memory_advice.torch.ops._C,
-        "cuda_advise_um_hints_for_tensor",
-        advise,
-        raising=False,
-    )
-
-    valid = FakeTensor(device="cpu")
-    cuda_memory_advice.advise_cuda_um_hints_for_tensor(valid, 0)
-    advise.assert_called_once_with(valid, 0)
-
-    with pytest.raises(ValueError, match="CPU tensor"):
-        cuda_memory_advice.advise_cuda_um_hints_for_tensor(
-            FakeTensor(device="cuda:0"),
-            0,
-        )
-
-    with pytest.raises(ValueError, match="non-pinned"):
-        cuda_memory_advice.advise_cuda_um_hints_for_tensor(
-            FakeTensor(device="cpu", pinned=True),
-            0,
-        )
-
-    with pytest.raises(ValueError, match="contiguous"):
-        cuda_memory_advice.advise_cuda_um_hints_for_tensor(
-            FakeTensor(device="cpu", contiguous=False),
-            0,
-        )
-
-    zero_size = FakeTensor(device="cpu", numel=0)
-    cuda_memory_advice.advise_cuda_um_hints_for_tensor(zero_size, 0)
-    assert advise.call_count == 2
-
-
-def test_get_system_unified_cuda_view_policy_wrapper(monkeypatch):
+def test_copy_tensor_to_cuda_um_hints_storage_preconditions(monkeypatch):
     sentinel = object()
+    copy = Mock(return_value=sentinel)
     monkeypatch.setattr(
         cuda_memory_advice,
         "require_cuda_um_hints_support",
@@ -274,89 +248,88 @@ def test_get_system_unified_cuda_view_policy_wrapper(monkeypatch):
     )
     monkeypatch.setattr(
         cuda_memory_advice,
-        "get_system_unified_cuda_view_from_cpu_tensor",
-        lambda cpu_tensor, device: sentinel,
+        "copy_to_managed_cuda_tensor",
+        copy,
     )
 
     valid = FakeTensor(device="cpu")
-    assert cuda_memory_advice.get_system_unified_cuda_view(valid, 0) is sentinel
+    assert cuda_memory_advice.copy_tensor_to_cuda_um_hints_storage(valid, 0) is sentinel
+    copy.assert_called_once_with(valid, 0)
 
-    with pytest.raises(ValueError, match="CPU tensor"):
-        cuda_memory_advice.get_system_unified_cuda_view(
-            FakeTensor(device="cuda:0"),
-            0,
-        )
-
-    with pytest.raises(ValueError, match="non-pinned"):
-        cuda_memory_advice.get_system_unified_cuda_view(
-            FakeTensor(device="cpu", pinned=True),
+    with pytest.raises(ValueError, match="CPU or CUDA tensor"):
+        cuda_memory_advice.copy_tensor_to_cuda_um_hints_storage(
+            FakeTensor(device="meta"),
             0,
         )
 
     with pytest.raises(ValueError, match="contiguous"):
-        cuda_memory_advice.get_system_unified_cuda_view(
+        cuda_memory_advice.copy_tensor_to_cuda_um_hints_storage(
             FakeTensor(device="cpu", contiguous=False),
             0,
         )
 
     zero_size = FakeTensor(device="cpu", numel=0)
-    assert cuda_memory_advice.get_system_unified_cuda_view(zero_size, 0) is sentinel
+    assert cuda_memory_advice.copy_tensor_to_cuda_um_hints_storage(zero_size, 0) is sentinel
+    assert copy.call_count == 2
 
 
-def test_cuda_um_hints_advice_and_view_roundtrip():
+def test_copy_to_managed_cuda_tensor_roundtrip():
     if not hasattr(torch.ops, "_C"):
         pytest.skip("CUDA stable ops are unavailable")
-    if not hasattr(torch.ops._C, "cuda_advise_um_hints_for_tensor"):
-        pytest.skip("CUDA UM hints ops are unavailable")
-    if not hasattr(torch.ops._C, "get_system_unified_cuda_view_from_cpu_tensor"):
-        pytest.skip("CUDA UM hints ops are unavailable")
+    if not hasattr(torch.ops._C, "copy_to_managed_cuda_tensor"):
+        pytest.skip("CUDA managed-memory op is unavailable")
 
     support = cuda_memory_advice.cuda_um_hints_supported(0)
     if not support.supported:
         pytest.skip(
-            "requires supported CUDA full Unified Memory platform: "
+            "requires supported CUDA managed-memory platform: "
             f"{support.reason}"
         )
 
-    cpu = torch.arange(1024, dtype=torch.float16, device="cpu")
-    if not cpu.is_contiguous():
-        cpu = cpu.contiguous()
-
-    assert not cpu.is_pinned()
-
-    torch.ops._C.cuda_advise_um_hints_for_tensor(cpu, 0)
-    gpu_view = torch.ops._C.get_system_unified_cuda_view_from_cpu_tensor(cpu, 0)
-
-    assert gpu_view.is_cuda
-    assert gpu_view.shape == cpu.shape
-    assert gpu_view.stride() == cpu.stride()
-    torch.testing.assert_close(gpu_view.cpu(), cpu)
-
-
-def test_get_system_unified_cuda_view_opcheck():
-    if not hasattr(torch.library, "opcheck"):
-        pytest.skip("torch.library.opcheck is unavailable")
-    if not hasattr(torch.ops, "_C"):
-        pytest.skip("CUDA stable ops are unavailable")
-    if not hasattr(torch.ops._C, "get_system_unified_cuda_view_from_cpu_tensor"):
-        pytest.skip("CUDA UM hints ops are unavailable")
-
-    support = cuda_memory_advice.cuda_um_hints_supported(0)
-    if not support.supported:
-        pytest.skip(
-            "requires supported CUDA full Unified Memory platform: "
-            f"{support.reason}"
-        )
-
-    result = torch.library.opcheck(
-        torch.ops._C.get_system_unified_cuda_view_from_cpu_tensor,
-        (torch.empty((2, 4), dtype=torch.float16), 0),
-        test_utils=("test_schema", "test_faketensor"),
-        raise_exception=False,
+    cases = (
+        torch.arange(1024, dtype=torch.float32, device="cpu"),
+        torch.arange(1024, dtype=torch.float16, device="cpu") / 1024,
     )
 
-    if result:
-        pytest.skip(
-            "opcheck is not supported for the stable-ABI view op: "
-            f"{result}"
+    for cpu in cases:
+        managed = torch.ops._C.copy_to_managed_cuda_tensor(cpu, 0)
+
+        assert managed.is_cuda
+        assert managed.device.index == 0
+        assert managed.shape == cpu.shape
+        assert managed.dtype == cpu.dtype
+        assert managed.stride() == cpu.stride()
+        torch.testing.assert_close(managed.cpu(), cpu)
+
+        gpu_value = (managed * 2).sum(dtype=torch.float64)
+        torch.cuda.synchronize(0)
+        torch.testing.assert_close(
+            gpu_value.cpu(), (cpu * 2).sum(dtype=torch.float64)
         )
+
+
+def test_copy_to_managed_cuda_tensor_restores_current_device():
+    if not hasattr(torch.ops, "_C"):
+        pytest.skip("CUDA stable ops are unavailable")
+    if not hasattr(torch.ops._C, "copy_to_managed_cuda_tensor"):
+        pytest.skip("CUDA managed-memory op is unavailable")
+    if torch.cuda.device_count() < 2:
+        pytest.skip("requires at least two CUDA devices")
+
+    original_device = torch.cuda.current_device()
+    target_device = 1 if original_device == 0 else 0
+
+    support = cuda_memory_advice.cuda_um_hints_supported(target_device)
+    if not support.supported:
+        pytest.skip(
+            "requires supported CUDA managed-memory platform: "
+            f"{support.reason}"
+        )
+
+    cpu = torch.arange(16, dtype=torch.float32, device="cpu")
+    try:
+        managed = torch.ops._C.copy_to_managed_cuda_tensor(cpu, target_device)
+        assert managed.device.index == target_device
+        assert torch.cuda.current_device() == original_device
+    finally:
+        torch.cuda.set_device(original_device)

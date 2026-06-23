@@ -1,8 +1,5 @@
-
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-from contextlib import nullcontext
 
 import pytest
 import torch
@@ -108,7 +105,10 @@ def clear_loader_cache():
 
 
 def test_uva_offloader_cuda_um_hints_initialization(monkeypatch):
-    monkeypatch.setattr("vllm.model_executor.offloader.uva.is_uva_available", lambda: True)
+    monkeypatch.setattr(
+        "vllm.model_executor.offloader.uva.is_uva_available",
+        lambda: True,
+    )
     monkeypatch.setattr(
         "vllm.model_executor.offloader.uva.envs.VLLM_WEIGHT_OFFLOADING_DISABLE_UVA",
         False,
@@ -119,7 +119,10 @@ def test_uva_offloader_cuda_um_hints_initialization(monkeypatch):
         "vllm.model_executor.offloader.uva.require_cuda_um_hints_support",
         lambda device: require.append(device),
     )
-    monkeypatch.setattr("vllm.model_executor.offloader.uva.torch.cuda.is_available", lambda: False)
+    monkeypatch.setattr(
+        "vllm.model_executor.offloader.uva.torch.cuda.is_available",
+        lambda: False,
+    )
 
     offloader = UVAOffloader(1024, memory_advice="cuda_um_hints")
 
@@ -143,8 +146,13 @@ def test_uva_offloader_cuda_um_hints_requires_uva_enabled(monkeypatch):
         UVAOffloader(1024, memory_advice="cuda_um_hints")
 
 
-def test_uva_offloader_cuda_um_hints_offload_records_metadata_and_uses_system_unified_view(monkeypatch):
-    monkeypatch.setattr("vllm.model_executor.offloader.uva.is_uva_available", lambda: True)
+def test_uva_offloader_cuda_um_hints_offload_records_metadata_and_uses_managed_copy(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "vllm.model_executor.offloader.uva.is_uva_available",
+        lambda: True,
+    )
     monkeypatch.setattr(
         "vllm.model_executor.offloader.uva.envs.VLLM_WEIGHT_OFFLOADING_DISABLE_UVA",
         False,
@@ -154,21 +162,23 @@ def test_uva_offloader_cuda_um_hints_offload_records_metadata_and_uses_system_un
         "vllm.model_executor.offloader.uva.require_cuda_um_hints_support",
         lambda device: None,
     )
-    monkeypatch.setattr("vllm.model_executor.offloader.uva.torch.cuda.is_available", lambda: False)
+    monkeypatch.setattr(
+        "vllm.model_executor.offloader.uva.torch.cuda.is_available",
+        lambda: False,
+    )
 
-    advise_calls: list[tuple[FakeTensor, int]] = []
+    copied: list[tuple[FakeTensor, int]] = []
     sentinel = FakeTensor(device="cuda:0", pinned=False, contiguous=True)
 
-    def advise(cpu_tensor, device_id):
-        advise_calls.append((cpu_tensor, device_id))
+    def managed_copy(cpu_tensor, device_id):
+        assert cpu_tensor.device.type == "cpu"
+        assert cpu_tensor.is_contiguous()
+        copied.append((cpu_tensor, device_id))
+        return sentinel
 
     monkeypatch.setattr(
-        "vllm.model_executor.offloader.uva.advise_cuda_um_hints_for_tensor",
-        advise,
-    )
-    monkeypatch.setattr(
-        "vllm.model_executor.offloader.uva.get_system_unified_cuda_view",
-        lambda cpu_tensor, device_id: sentinel,
+        "vllm.model_executor.offloader.uva.copy_tensor_to_cuda_um_hints_storage",
+        managed_copy,
     )
 
     offloader = UVAOffloader(1024, memory_advice="cuda_um_hints")
@@ -181,13 +191,15 @@ def test_uva_offloader_cuda_um_hints_offload_records_metadata_and_uses_system_un
     assert param.data is sentinel
     assert param._vllm_is_uva_offloaded is True
     assert param._vllm_uva_memory_advice == "cuda_um_hints"
-    assert advise_calls[0][1] == 0
-    assert advise_calls[0][0].device.type == "cpu"
+    assert copied[0][1] == 0
     assert original.to_calls[0] == ("cpu", False)
 
 
 def test_uva_offloader_default_path_remains_unchanged(monkeypatch):
-    monkeypatch.setattr("vllm.model_executor.offloader.uva.is_uva_available", lambda: True)
+    monkeypatch.setattr(
+        "vllm.model_executor.offloader.uva.is_uva_available",
+        lambda: True,
+    )
     monkeypatch.setattr(
         "vllm.model_executor.offloader.uva.envs.VLLM_WEIGHT_OFFLOADING_DISABLE_UVA",
         False,
@@ -198,13 +210,26 @@ def test_uva_offloader_default_path_remains_unchanged(monkeypatch):
         lambda: True,
     )
     sentinel = FakeTensor(device="cuda:0", pinned=False, contiguous=True)
+    observed: list[FakeTensor] = []
+
+    monkeypatch.setattr(
+        "vllm.model_executor.offloader.uva.copy_tensor_to_cuda_um_hints_storage",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("managed-memory path must not run for memory_advice='none'")
+        ),
+    )
+
+    def accelerator_view(cpu_tensor):
+        observed.append(cpu_tensor)
+        return sentinel
+
     monkeypatch.setattr(
         "vllm.model_executor.offloader.uva.get_accelerator_view_from_cpu_tensor",
-        lambda cpu_tensor: sentinel,
+        accelerator_view,
     )
 
     offloader = UVAOffloader(1024, memory_advice="none")
-    original = FakeTensor(device="cuda:0", pinned=False, contiguous=True)
+    original = FakeTensor(device="cuda:0", pinned=False, contiguous=False)
     module = FakeModule({"weight": FakeParam(original)})
 
     offloader._maybe_offload_to_cpu(module)
@@ -212,11 +237,94 @@ def test_uva_offloader_default_path_remains_unchanged(monkeypatch):
     param = module._params["weight"]
     assert param.data is sentinel
     assert param._vllm_is_uva_offloaded is True
-    assert param._vllm_uva_memory_advice == "none"
-    assert original.pin_memory_calls == 1
+    assert not hasattr(param, "_vllm_uva_memory_advice")
+    assert observed[0].is_pinned()
+    assert not observed[0].is_contiguous()
 
 
-def test_device_loading_context_reoffloads_replaced_uva_parameter(monkeypatch):
+def test_device_loading_context_keeps_default_uva_view_in_place(monkeypatch):
+    monkeypatch.setattr(
+        loader_utils,
+        "copy_tensor_to_cuda_um_hints_storage",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("managed-memory path must not run for memory_advice='none'")
+        ),
+    )
+    monkeypatch.setattr(
+        loader_utils,
+        "get_accelerator_view_from_cpu_tensor",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("default UVA view must not be recreated unless replaced")
+        ),
+    )
+
+    original = FakeTensor(device="cuda:0", pinned=False, contiguous=True)
+    param = FakeParam(original)
+    param._vllm_is_uva_offloaded = True
+    module = FakeModule({"weight": param})
+
+    with loader_utils.device_loading_context(module, torch.device("cuda", 0)):
+        assert param.data is original
+
+    assert original.to_calls == []
+    assert param.data is original
+    assert param._vllm_is_uva_offloaded is True
+    assert not hasattr(param, "_vllm_uva_memory_advice")
+
+
+def test_device_loading_context_reoffloads_replaced_default_uva_parameter(
+    monkeypatch,
+):
+    monkeypatch.setattr(loader_utils, "is_pin_memory_available", lambda: True)
+    monkeypatch.setattr(
+        loader_utils.envs,
+        "VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY",
+        False,
+        raising=False,
+    )
+
+    monkeypatch.setattr(
+        loader_utils,
+        "copy_tensor_to_cuda_um_hints_storage",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("managed-memory path must not run for memory_advice='none'")
+        ),
+    )
+
+    observed: list[FakeTensor] = []
+    sentinel = FakeTensor(device="cuda:0", pinned=True, contiguous=True)
+
+    def accelerator_view(cpu_tensor):
+        observed.append(cpu_tensor)
+        return sentinel
+
+    monkeypatch.setattr(
+        loader_utils,
+        "get_accelerator_view_from_cpu_tensor",
+        accelerator_view,
+    )
+
+    original = FakeTensor(device="cuda:0", pinned=False, contiguous=True)
+    param = FakeParam(original)
+    param._vllm_is_uva_offloaded = True
+    module = FakeModule({"weight": param})
+
+    with loader_utils.device_loading_context(module, torch.device("cuda", 0)):
+        replacement = FakeTensor(device="cuda:0", pinned=False, contiguous=False)
+        param.data = replacement
+        delattr(param, "_vllm_is_uva_offloaded")
+
+    assert original.to_calls == []
+    assert observed[0].is_pinned()
+    assert not observed[0].is_contiguous()
+    assert param.data is sentinel
+    assert param._vllm_is_uva_offloaded is True
+    assert not hasattr(param, "_vllm_uva_memory_advice")
+
+
+def test_device_loading_context_reoffloads_replaced_uva_parameter_with_managed_copy(
+    monkeypatch,
+):
     monkeypatch.setattr(loader_utils, "is_pin_memory_available", lambda: False)
     monkeypatch.setattr(
         loader_utils.envs,
@@ -225,17 +333,19 @@ def test_device_loading_context_reoffloads_replaced_uva_parameter(monkeypatch):
         raising=False,
     )
 
-    advise_calls: list[tuple[FakeTensor, int]] = []
+    copied: list[tuple[FakeTensor, int]] = []
     sentinel = FakeTensor(device="cuda:0", pinned=False, contiguous=True)
 
-    def advise(cpu_tensor, device_id):
-        advise_calls.append((cpu_tensor, device_id))
+    def managed_copy(cpu_tensor, device_id):
+        assert cpu_tensor.device.type == "cpu"
+        assert cpu_tensor.is_contiguous()
+        copied.append((cpu_tensor, device_id))
+        return sentinel
 
-    monkeypatch.setattr(loader_utils, "advise_cuda_um_hints_for_tensor", advise)
     monkeypatch.setattr(
         loader_utils,
-        "get_system_unified_cuda_view",
-        lambda cpu_tensor, device_id: sentinel,
+        "copy_tensor_to_cuda_um_hints_storage",
+        managed_copy,
     )
 
     original = FakeTensor(device="cuda:0", pinned=False, contiguous=True)
@@ -249,9 +359,8 @@ def test_device_loading_context_reoffloads_replaced_uva_parameter(monkeypatch):
         param.data = replacement
         delattr(param, "_vllm_is_uva_offloaded")
 
-    assert original.to_calls[0] == (torch.device("cuda", 0), True)
-    assert advise_calls[0][1] == 0
-    assert advise_calls[0][0].origin is replacement
+    assert original.to_calls == []
+    assert copied[0][1] == 0
     assert param.data is sentinel
     assert param._vllm_is_uva_offloaded is True
     assert param._vllm_uva_memory_advice == "cuda_um_hints"

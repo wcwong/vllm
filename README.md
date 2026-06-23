@@ -37,7 +37,7 @@ vLLM is fast with:
 - Speculative decoding including n-gram, suffix, EAGLE, DFlash
 - Automatic kernel generation and graph-level transformations using torch.compile
 - Disaggregated prefill, decode, and encode
-- CUDA Unified Memory hints for UVA weight offload on supported hardware-coherent
+- CUDA managed-memory hints for UVA weight offload on supported hardware-coherent
   CUDA systems. See [CUDA Unified Memory Hints for UVA Weight Offload](docs/features/cuda_um_hints_offload.md).
 
 vLLM is flexible and easy to use with:

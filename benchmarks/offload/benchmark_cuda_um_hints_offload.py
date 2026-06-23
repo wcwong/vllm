@@ -2,11 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Microbenchmark for CUDA Unified Memory hints on UVA weight offload.
 
-Compares three paths:
-
-- default UVA as configured by vLLM,
-- a non-pinned system-memory CUDA view without advice, and
-- a non-pinned system-memory CUDA view with cuda_um_hints.
+Compares the default UVA path against the managed-memory copy path used by
+`cuda_um_hints`.
 """
 
 from __future__ import annotations
@@ -14,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import resource
 import statistics
 import time
 from pathlib import Path
@@ -21,11 +19,12 @@ from pathlib import Path
 import torch
 
 from vllm.model_executor.offloader.cuda_memory_advice import (
-    advise_cuda_um_hints_for_tensor,
     cuda_um_hints_supported,
-    get_system_unified_cuda_view,
 )
-from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
+from vllm.utils.torch_utils import (
+    copy_to_managed_cuda_tensor,
+    get_accelerator_view_from_cpu_tensor,
+)
 
 DEFAULT_SIZES_GB = (1.0, 4.0, 16.0, 64.0)
 DEFAULT_WARMUP = 3
@@ -72,6 +71,17 @@ def _assert_close(
         )
 
 
+def _memory_counters(device: int) -> dict[str, int]:
+    free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+    return {
+        "cpu_max_rss_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+        "cuda_memory_allocated_bytes": torch.cuda.memory_allocated(device),
+        "cuda_memory_reserved_bytes": torch.cuda.memory_reserved(device),
+        "cuda_mem_get_info_free_bytes": free_bytes,
+        "cuda_mem_get_info_total_bytes": total_bytes,
+    }
+
+
 def _percentile(values: list[float], percentile: float) -> float:
     if not values:
         raise ValueError("values must not be empty")
@@ -96,7 +106,7 @@ def _measure_variant(
     warmup: int,
     repeat: int,
     reference_checksum: float,
-) -> dict[str, float | str | int]:
+) -> dict[str, object]:
     for _ in range(warmup):
         view = view_fn(cpu_tensor, device)
         checksum = float(view.sum(dtype=torch.float64).item())
@@ -130,16 +140,8 @@ def _default_uva_view(cpu_tensor: torch.Tensor, device: int) -> torch.Tensor:
     return get_accelerator_view_from_cpu_tensor(cpu_tensor)
 
 
-def _system_unified_view(cpu_tensor: torch.Tensor, device: int) -> torch.Tensor:
-    return get_system_unified_cuda_view(cpu_tensor, device)
-
-
-def _system_unified_view_with_hints(
-    cpu_tensor: torch.Tensor,
-    device: int,
-) -> torch.Tensor:
-    advise_cuda_um_hints_for_tensor(cpu_tensor, device)
-    return get_system_unified_cuda_view(cpu_tensor, device)
+def _managed_memory_view(cpu_tensor: torch.Tensor, device: int) -> torch.Tensor:
+    return copy_to_managed_cuda_tensor(cpu_tensor, device)
 
 
 def _main() -> int:
@@ -161,6 +163,7 @@ def _main() -> int:
         "driver_version": support.driver_version,
         "attrs": support.attrs,
         "kernel_release": support.kernel_release,
+        "initial_memory": _memory_counters(args.device),
         "sizes": [],
     }
 
@@ -177,10 +180,10 @@ def _main() -> int:
 
         variants = (
             ("default_uva", _default_uva_view),
-            ("system_unified_view", _system_unified_view),
-            ("system_unified_view_with_hints", _system_unified_view_with_hints),
+            ("managed_memory_copy", _managed_memory_view),
         )
         for name, view_fn in variants:
+            memory_before = _memory_counters(args.device)
             variant = _measure_variant(
                 name=name,
                 view_fn=view_fn,
@@ -190,13 +193,19 @@ def _main() -> int:
                 repeat=args.repeat,
                 reference_checksum=reference_checksum,
             )
+            variant["memory_before"] = memory_before
+            variant["memory_after"] = _memory_counters(args.device)
             size_result["variants"].append(variant)
+            avg_s = float(variant["avg_s"])
+            median_s = float(variant["median_s"])
+            p95_s = float(variant["p95_s"])
+            gib_per_s = float(variant["gib_per_s"])
             print(
                 f"size={size_gb:g}GiB variant={name} "
-                f"avg={variant['avg_s']:.6f}s "
-                f"median={variant['median_s']:.6f}s "
-                f"p95={variant['p95_s']:.6f}s "
-                f"bw={variant['gib_per_s']:.2f}GiB/s"
+                f"avg={avg_s:.6f}s "
+                f"median={median_s:.6f}s "
+                f"p95={p95_s:.6f}s "
+                f"bw={gib_per_s:.2f}GiB/s"
             )
 
         results["sizes"].append(size_result)

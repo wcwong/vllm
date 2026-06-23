@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
+from pydantic import TypeAdapter
 
+import vllm.engine.arg_utils as arg_utils
 from vllm.config.offload import OffloadConfig, PrefetchOffloadConfig, UVAOffloadConfig
-from vllm.engine.arg_utils import EngineArgs, get_kwargs
+from vllm.engine.arg_utils import EngineArgs, FlexibleArgumentParser, get_kwargs
 
 
 def test_cuda_um_hints_requires_cpu_offload_gb():
@@ -53,12 +55,39 @@ def test_cuda_um_hints_participates_in_hash():
     assert base != hinted
 
 
-def test_engine_args_exposes_cuda_um_hints_choice_and_help():
+
+def test_cuda_um_hints_dict_config_path_accepts_value():
+    config = TypeAdapter(OffloadConfig).validate_python(
+        {
+            "uva": {
+                "cpu_offload_gb": 1,
+                "memory_advice": "cuda_um_hints",
+            },
+        }
+    )
+
+    assert config.uva.memory_advice == "cuda_um_hints"
+
+
+def test_engine_args_parser_accepts_offload_memory_advice_values():
+    parser = FlexibleArgumentParser()
+    EngineArgs.add_cli_args(parser)
+
+    hinted = parser.parse_args(["--offload-memory-advice", "cuda_um_hints"])
+    default = parser.parse_args(["--offload-memory-advice", "none"])
+
+    assert hinted.offload_memory_advice == "cuda_um_hints"
+    assert default.offload_memory_advice == "none"
+
+
+def test_engine_args_exposes_cuda_um_hints_choice_and_help(monkeypatch):
+    monkeypatch.setattr(arg_utils, "NEEDS_HELP", True)
+    arg_utils._compute_kwargs.cache_clear()
     kwargs = get_kwargs(EngineArgs)
     offload_memory_advice = kwargs["offload_memory_advice"]
 
     assert offload_memory_advice["choices"] == ["cuda_um_hints", "none"]
     assert (
-        "CUDA memory advice policy for UVA CPU weight offloading."
+        "CUDA managed-memory policy for UVA CPU weight offloading."
         in offload_memory_advice["help"]
     )

@@ -190,11 +190,8 @@ torch::stable::Tensor get_cuda_view_from_cpu_tensor(
     torch::stable::Tensor& cpu_tensor);
 
 #ifdef VLLM_ENABLE_CUDA_UM_HINTS
-torch::stable::Tensor get_system_unified_cuda_view_from_cpu_tensor(
-    torch::stable::Tensor& cpu_tensor, int64_t device_id);
-
-void cuda_advise_um_hints_for_tensor(torch::stable::Tensor& cpu_tensor,
-                                     int64_t device_id);
+torch::stable::Tensor copy_to_managed_cuda_tensor(
+    torch::stable::Tensor& src, int64_t device_id);
 #endif
 
 #endif

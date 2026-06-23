@@ -13,6 +13,14 @@ The engine argument classes, [EngineArgs][vllm.engine.arg_utils.EngineArgs] and 
 
 --8<-- "docs/cli/json_tip.inc.md"
 
+## Offload Memory Advice
+
+`--offload-memory-advice` accepts `none` or `cuda_um_hints`. The
+`cuda_um_hints` value stores selected UVA CPU-offloaded weights in CUDA managed
+memory, applies CUDA Unified Memory read-mostly and accessed-by advice, and
+requires `--offload-backend uva`, `--cpu-offload-gb > 0`, and a supported CUDA
+managed-memory platform.
+
 ## `EngineArgs`
 
 --8<-- "docs/generated/argparse/engine_args.inc.md"

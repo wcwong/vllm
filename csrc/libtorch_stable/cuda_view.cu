@@ -78,28 +78,3 @@ torch::stable::Tensor get_cuda_view_from_cpu_tensor(
                                   contiguous_cpu.strides(), cuda_dev,
                                   contiguous_cpu.scalar_type(), deleter);
 }
-
-#ifdef VLLM_ENABLE_CUDA_UM_HINTS
-torch::stable::Tensor get_system_unified_cuda_view_from_cpu_tensor(
-    torch::stable::Tensor& cpu_tensor, int64_t device_id) {
-  STD_TORCH_CHECK(cpu_tensor.device().is_cpu(), "Input tensor must be on CPU");
-  STD_TORCH_CHECK(!is_pinned_cpu_tensor(cpu_tensor),
-                  "system-unified CUDA view requires non-pinned CPU memory");
-  STD_TORCH_CHECK(cpu_tensor.is_contiguous(),
-                  "system-unified CUDA view requires contiguous CPU memory");
-
-  const torch::stable::Device cuda_dev(
-      torch::headeronly::DeviceType::CUDA,
-      static_cast<int16_t>(device_id));
-
-  if (cpu_tensor.numel() == 0) {
-    return torch::stable::empty(cpu_tensor.sizes(), cpu_tensor.scalar_type(),
-                                cpu_tensor.layout(), cuda_dev);
-  }
-
-  void* ptr = const_cast<void*>(cpu_tensor.mutable_data_ptr());
-  return torch::stable::from_blob(
-      ptr, cpu_tensor.sizes(), cpu_tensor.strides(), cuda_dev,
-      cpu_tensor.scalar_type(), [base = cpu_tensor](void*) {});
-}
-#endif
